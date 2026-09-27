@@ -1,9 +1,8 @@
-"""Small, offline renderer for Scene v1.
+"""Offline Scene v1 renderer with proxy and supported static resource models.
 
-The meshes in this module are useful spatial proxies. They are deliberately not
-presented as Minecraft's resource-pack-rendered block models: texture atlases,
-model JSON, biome tint, connected textures, and neighbour-dependent models are
-outside the renderer's scope.
+Without resource packs, meshes remain useful spatial proxies. Optional pack
+support resolves a bounded subset of blockstate/model JSON and textures; it does
+not reproduce Minecraft's full runtime renderer or its world-dependent effects.
 """
 
 from __future__ import annotations
@@ -25,6 +24,12 @@ import trimesh
 _ALLOWED_VIEWS = {"iso", "top", "north", "east", "south", "west", "bottom"}
 _VIEW_SIZE = (1040, 780)
 _SS = 2
+_MAX_RESOURCE_PACK_ROOTS = 64
+_MAX_RESOURCE_FACES = 100_000
+_MAX_RESOURCE_TEXTURE_PIXELS = 16_777_216
+_MAX_RESOURCE_TOTAL_TEXTURE_PIXELS = 32_000_000
+_MAX_RESOURCE_LOCAL_COORDINATE = 64.0
+_MAX_RESOURCE_UV_COORDINATE = 1024.0
 
 
 @dataclass(frozen=True)
@@ -42,6 +47,9 @@ class _Face:
     points: tuple[tuple[float, float, float], ...]
     color: tuple[int, int, int]
     source: str = "block"
+    uv: tuple[tuple[float, float], ...] | None = None
+    texture: Image.Image | None = None
+    texture_key: str | None = None
 
 
 def _stable_color(name: str) -> tuple[int, int, int]:
@@ -355,6 +363,20 @@ def _world_corners(bounds_min: Sequence[int], bounds_max_exclusive: Sequence[int
             for y in (bounds_min[1], bounds_max_exclusive[1]) for z in (bounds_min[2], bounds_max_exclusive[2])]
 
 
+def _texture_indices(uv: np.ndarray, width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
+    """Map normalized top-left-origin UVs to nearest repeating texels."""
+    def wrap(values: np.ndarray) -> np.ndarray:
+        nearest = np.rint(values)
+        snapped = np.where(np.abs(values - nearest) <= 1e-10, nearest, values)
+        return np.mod(snapped, 1.0)
+
+    u = wrap(uv[..., 0])
+    v = wrap(uv[..., 1])
+    x = np.minimum((u * width).astype(np.int64), width - 1)
+    y = np.minimum((v * height).astype(np.int64), height - 1)
+    return x, y
+
+
 def _render_view(
     path: Path,
     view: str,
@@ -364,6 +386,7 @@ def _render_view(
     bounds_max: Sequence[int],
     *,
     no_known_solids: bool = False,
+    no_solids_message: str | None = None,
 ) -> None:
     width, height = _VIEW_SIZE
     scale = _SS
@@ -418,6 +441,7 @@ def _render_view(
     pixels = np.asarray(image, dtype=np.uint8).copy()
     depth_buffer = np.full((height * scale, width * scale), -np.inf, dtype=np.float32)
     image_h, image_w = depth_buffer.shape
+    texture_cache: dict[int, np.ndarray] = {}
     for face in faces:
         pts3 = np.asarray(face.points, dtype=np.float64)
         normal = np.cross(pts3[1] - pts3[0], pts3[2] - pts3[0])
@@ -426,6 +450,14 @@ def _render_view(
         projected_face = [screen_float(p) for p in face.points]
         depths = np.asarray([project(p)[2] for p in face.points], dtype=np.float64)
         fill = np.asarray(face.color, dtype=np.uint8)
+        face_uv = np.asarray(face.uv, dtype=np.float64) if face.uv is not None and face.texture is not None else None
+        texture_rgba: np.ndarray | None = None
+        if face.texture is not None and face_uv is not None:
+            texture_id = id(face.texture)
+            texture_rgba = texture_cache.get(texture_id)
+            if texture_rgba is None:
+                texture_rgba = np.asarray(face.texture.convert("RGBA"), dtype=np.uint8)
+                texture_cache[texture_id] = texture_rgba
         for i0, i1, i2 in ((0, 1, 2), (0, 2, 3)):
             tri = np.asarray([projected_face[i0], projected_face[i1], projected_face[i2]], dtype=np.float64)
             tri_z = np.asarray([depths[i0], depths[i1], depths[i2]], dtype=np.float64)
@@ -451,10 +483,27 @@ def _render_view(
             zview = depth_buffer[min_y:max_y + 1, min_x:max_x + 1]
             update = inside & (z > zview)
             if np.any(update):
-                zview[update] = z[update].astype(np.float32)
                 tile = pixels[min_y:max_y + 1, min_x:max_x + 1]
-                tile[update] = fill
-        line_color = (72, 79, 82) if face.source == "block" else (199, 84, 20)
+                if texture_rgba is None or face_uv is None:
+                    zview[update] = z[update].astype(np.float32)
+                    tile[update] = fill
+                else:
+                    uv_tri = face_uv[[i0, i1, i2]]
+                    sample_uv = (w0[..., None] * uv_tri[0] + w1[..., None] * uv_tri[1]
+                                 + w2[..., None] * uv_tri[2])
+                    tx, ty = _texture_indices(sample_uv, texture_rgba.shape[1], texture_rgba.shape[0])
+                    sampled = texture_rgba[ty, tx]
+                    # Resource-pack cutout texels do not claim depth. Partial
+                    # alpha is treated as a thresholded cutout in these PNGs.
+                    visible_texel = sampled[:, :, 3] >= 128
+                    update &= visible_texel
+                    zview[update] = z[update].astype(np.float32)
+                    if np.any(update):
+                        rgb = sampled[:, :, :3]
+                        if np.any(fill != 255):
+                            rgb = ((rgb.astype(np.uint16) * fill.astype(np.uint16)) // 255).astype(np.uint8)
+                        tile[update] = rgb[update]
+        line_color = (72, 79, 82) if face.source in {"block", "resource"} else (199, 84, 20)
         # Keep a supersampled edge only where its interpolated depth matches
         # the visible surface; hidden seams therefore cannot leak through walls.
         for edge in range(4):
@@ -466,6 +515,11 @@ def _render_view(
             ey = np.rint(p0[1] + (p1[1] - p0[1]) * t).astype(int)
             ez = z0 + (z1 - z0) * t
             valid = (ex >= 0) & (ex < image_w) & (ey >= 0) & (ey < image_h)
+            if texture_rgba is not None and face_uv is not None:
+                uv0, uv1 = face_uv[edge], face_uv[(edge + 1) % 4]
+                edge_uv = uv0[None, :] + (uv1 - uv0)[None, :] * t[:, None]
+                tx, ty = _texture_indices(edge_uv, texture_rgba.shape[1], texture_rgba.shape[0])
+                valid &= texture_rgba[ty, tx, 3] >= 128
             valid_indices = np.flatnonzero(valid)
             if len(valid_indices):
                 visible = np.abs(depth_buffer[ey[valid_indices], ex[valid_indices]] - ez[valid_indices]) < 0.01
@@ -508,7 +562,8 @@ def _render_view(
     draw.text((32 * scale, 20 * scale), title, fill=(33, 45, 53), font=header_font)
     draw.text((32 * scale, 51 * scale), orientation, fill=(79, 91, 98), font=body_font)
     if no_known_solids:
-        draw.text((32 * scale, 74 * scale), "No indexed non-air blocks in this bounded Scene", fill=(139, 87, 43), font=body_font)
+        draw.text((32 * scale, 74 * scale), no_solids_message or "No indexed non-air blocks in this bounded Scene",
+                  fill=(139, 87, 43), font=body_font)
     extents = f"X [{bounds_min[0]}..{bounds_max[0]}]  Y [{bounds_min[1]}..{bounds_max[1]}]  Z [{bounds_min[2]}..{bounds_max[2]}]  (inclusive)"
     draw.text((32 * scale, (height - 30) * scale), extents, fill=(56, 66, 73), font=body_font)
     if unknown_chunks:
@@ -528,8 +583,44 @@ def _format_coord(value: float) -> str:
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
+def _resource_state_key(name: str, properties: Mapping[str, Any]) -> str:
+    if not properties:
+        return name
+    canonical = json.dumps(dict(sorted(properties.items())), ensure_ascii=False, separators=(",", ":"))
+    return name + "[" + canonical + "]"
+
+
+def _resource_proxy_boxes(
+    name: str,
+    properties: Mapping[str, Any],
+    position: Sequence[int],
+    fallback_reasons: Sequence[str],
+) -> tuple[list[_Box], str, tuple[str, ...]]:
+    """Use the existing state proxy while retaining resolver fallback reasons."""
+    local_boxes, geometry_class, legacy_reason = _block_local_boxes(name, properties)
+    reasons = tuple(sorted({str(reason) for reason in fallback_reasons if str(reason)}))
+    if not reasons and legacy_reason:
+        reasons = (legacy_reason,)
+    if not reasons:
+        reasons = ("resource_model_unavailable",)
+    # The resource resolver's reason is authoritative in pack mode. The older
+    # proxy-specific reason remains useful when the resolver had no detail.
+    color = _stable_color(name)
+    boxes = [
+        _Box(
+            tuple(int(position[i]) + local[i] for i in range(3)),
+            tuple(int(position[i]) + local[i + 3] for i in range(3)),
+            color,
+            "block",
+        )
+        for local in local_boxes
+    ]
+    return boxes, geometry_class, reasons
+
+
 def _render_section(path: Path, axis: int, plane: float, boxes: Sequence[_Box], unknown_chunks: Sequence[Mapping[str, Any]],
-                    bounds_min: Sequence[int], bounds_max: Sequence[int], *, no_known_solids: bool = False) -> None:
+                    bounds_min: Sequence[int], bounds_max: Sequence[int], *, no_known_solids: bool = False,
+                    resource_approximation: bool = False) -> None:
     width, height = _VIEW_SIZE
     s = _SS
     image = Image.new("RGB", (width * s, height * s), (245, 247, 248))
@@ -613,7 +704,9 @@ def _render_section(path: Path, axis: int, plane: float, boxes: Sequence[_Box], 
     draw.text((32 * s, 20 * s), title, fill=(33, 45, 53), font=header_font)
     subtitle = hlabel + " · orange hatch = unknown chunk"
     if no_known_solids:
-        subtitle += " · no indexed non-air blocks"
+        subtitle += " · " + ("no visible static geometry" if resource_approximation else "no indexed non-air blocks")
+    if resource_approximation:
+        subtitle += " · resource geometry uses approximate bounds"
     draw.text((32 * s, 51 * s), subtitle, fill=(79, 91, 98), font=body_font)
     extents = f"Scene X [{bounds_min[0]}..{bounds_max[0]}]  Y [{bounds_min[1]}..{bounds_max[1]}]  Z [{bounds_min[2]}..{bounds_max[2]}] (inclusive)"
     draw.text((32 * s, (height - 30) * s), extents, fill=(56, 66, 73), font=body_font)
@@ -627,12 +720,15 @@ def render_scene(
     max_blocks: int = 50000,
     views: Sequence[str] = ("iso", "top", "north", "east"),
     sections: bool = True,
+    resource_packs: Sequence[str | Path] = (),
 ) -> dict[str, Any]:
-    """Export a simplified GLB and labelled CPU-rendered orthographic PNGs.
+    """Export a GLB and labelled CPU-rendered orthographic PNGs.
 
     Coordinates use X east, Y up, and Z south. Bounds in Scene v1 are inclusive
     block coordinates; mesh vertices are translated by ``world_origin`` and can
-    be restored to world coordinates by adding that vector.
+    be restored to world coordinates by adding that vector. Resource-pack roots
+    are read in sequence from lowest to highest priority and are never copied
+    beside the source tree; referenced model textures are embedded in the GLB.
     """
     from .scene import validate_scene
 
@@ -648,6 +744,10 @@ def render_scene(
         raise ValueError("views must not contain duplicates")
     if max_blocks < 0:
         raise ValueError("max_blocks must be non-negative")
+    if isinstance(resource_packs, (str, Path)):
+        raise TypeError("resource_packs must be a sequence of paths, not one path")
+    if len(resource_packs) > _MAX_RESOURCE_PACK_ROOTS:
+        raise ValueError(f"resource_packs has {len(resource_packs)} roots; max is {_MAX_RESOURCE_PACK_ROOTS}")
 
     bounds_min = [int(v) for v in data["bounds"]["min"]]
     bounds_max = [int(v) for v in data["bounds"]["max"]]
@@ -658,42 +758,207 @@ def render_scene(
     palette = data["palette"]
     world_origin = list(bounds_min)
 
+    resource_stack = None
+    resource_sources: Any = []
+    if resource_packs:
+        from .resources import ResourcePackStack
+
+        resource_stack = ResourcePackStack(resource_packs)
+
     block_boxes: list[_Box] = []
+    resource_section_boxes: list[_Box] = []
+    resource_faces: list[_Face] = []
     shape_counts: Counter[str] = Counter()
     fallback_reasons: Counter[str] = Counter()
     block_names: Counter[str] = Counter()
+    resource_status_counts: Counter[str] = Counter()
+    resource_state_counts: dict[str, dict[str, Any]] = {}
+    resource_approximation_reasons: Counter[str] = Counter()
+    resource_texture_sizes: dict[tuple[str, int], tuple[int, int]] = {}
+    resource_total_texture_pixels = 0
+    empty_resource_model_count = 0
     for record in block_records:
         pos = [int(v) for v in record["pos"]]
         entry = palette[int(record["palette"])]
         name = str(entry["name"])
         props = entry.get("properties", {})
-        local_boxes, geometry_class, fallback_reason = _block_local_boxes(name, props)
-        if geometry_class == "air":
+        if resource_stack is None:
+            local_boxes, geometry_class, fallback_reason = _block_local_boxes(name, props)
+            if geometry_class == "air":
+                continue
+            shape_counts[geometry_class] += 1
+            block_names[name] += 1
+            if fallback_reason:
+                fallback_reasons[fallback_reason] += 1
+            color = _stable_color(name)
+            for local in local_boxes:
+                lo = tuple(pos[i] + local[i] for i in range(3))
+                hi = tuple(pos[i] + local[i + 3] for i in range(3))
+                block_boxes.append(_Box(lo, hi, color, "block"))
             continue
-        shape_counts[geometry_class] += 1
+
+        resolution = resource_stack.resolve_block(name, props, position=tuple(pos))
+        status = str(getattr(resolution, "status", "fallback"))
+        if status not in {"resolved", "partial", "fallback"}:
+            raise ValueError(f"resource resolver returned unsupported status {status!r} for {name}")
+        reasons = tuple(sorted({str(reason) for reason in getattr(resolution, "reasons", ()) if str(reason)}))
+        model_ids = tuple(sorted({str(model_id) for model_id in getattr(resolution, "model_ids", ()) if str(model_id)}))
+        textures = getattr(resolution, "textures", {}) or {}
+        model_faces = tuple(getattr(resolution, "faces", ()))
+        state_key = _resource_state_key(name, props)
+        state_record = resource_state_counts.setdefault(
+            state_key,
+            {"blocks": 0, "statuses": Counter(), "reasons": Counter(), "model_ids": Counter(),
+             "resolved_faces": 0, "proxy_blocks": 0},
+        )
+        state_record["blocks"] += 1
+        state_record["statuses"][status] += 1
+        resource_status_counts[status] += 1
+        state_record["model_ids"].update(model_ids)
+
+        if status == "partial":
+            partial_reasons = reasons or ("partial_static_model_support",)
+            for reason in partial_reasons:
+                state_record["reasons"][reason] += 1
+                resource_approximation_reasons[reason] += 1
+
+        # Validate a complete block resolution before adding any of its faces.
+        # A malformed or missing texture falls back as one explicit state,
+        # avoiding a half-model that looks authoritative.
+        prepared_faces: list[_Face] = []
+        validation_reason: str | None = None
+        if status in {"resolved", "partial"}:
+            for model_face in model_faces:
+                try:
+                    points = tuple(tuple(float(component) for component in point) for point in model_face.points)
+                    if len(points) != 4 or any(len(point) != 3 for point in points):
+                        raise ValueError("resource_face_not_quad")
+                    if not np.isfinite(np.asarray(points, dtype=np.float64)).all():
+                        raise ValueError("resource_face_non_finite_geometry")
+                    if np.max(np.abs(np.asarray(points, dtype=np.float64))) > _MAX_RESOURCE_LOCAL_COORDINATE:
+                        raise ValueError("resource_face_extent_limit")
+                    raw_uv = getattr(model_face, "uv", None)
+                    uv = None if raw_uv is None else tuple(tuple(float(component) for component in item) for item in raw_uv)
+                    if uv is not None and (len(uv) != 4 or any(len(item) != 2 for item in uv)
+                                           or not np.isfinite(np.asarray(uv, dtype=np.float64)).all()):
+                        raise ValueError("resource_face_invalid_uv")
+                    if uv is not None and np.max(np.abs(np.asarray(uv, dtype=np.float64))) > _MAX_RESOURCE_UV_COORDINATE:
+                        raise ValueError("resource_face_uv_extent_limit")
+                    texture_key_value = getattr(model_face, "texture", None)
+                    texture_key = None if texture_key_value is None else str(texture_key_value)
+                    texture = textures.get(texture_key_value) if texture_key_value is not None else None
+                    if texture_key_value is None:
+                        raise ValueError("resource_face_texture_missing")
+                    if texture is None:
+                        raise ValueError("resource_texture_missing")
+                    if texture is not None:
+                        if not isinstance(texture, Image.Image):
+                            raise ValueError("resource_texture_invalid_image")
+                        texture_size_key = (texture_key or "", id(texture))
+                        if texture_size_key not in resource_texture_sizes:
+                            pixels = int(texture.width) * int(texture.height)
+                            if pixels <= 0 or pixels > _MAX_RESOURCE_TEXTURE_PIXELS:
+                                raise ValueError("resource_texture_size_limit")
+                            if resource_total_texture_pixels + pixels > _MAX_RESOURCE_TOTAL_TEXTURE_PIXELS:
+                                raise ValueError("resource_texture_pixel_budget")
+                            resource_texture_sizes[texture_size_key] = (texture.width, texture.height)
+                            resource_total_texture_pixels += pixels
+                        if uv is None:
+                            raise ValueError("resource_textured_face_missing_uv")
+                    prepared_faces.append(
+                        _Face(
+                            tuple(tuple(pos[i] + point[i] for i in range(3)) for point in points),
+                            (255, 255, 255) if texture is not None else _stable_color(name),
+                            "resource",
+                            uv,
+                            texture,
+                            texture_key,
+                        )
+                    )
+                    if len(resource_faces) + len(prepared_faces) > _MAX_RESOURCE_FACES:
+                        raise ValueError("resource_model_face_limit")
+                except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                    validation_reason = str(exc) or "resource_face_invalid"
+                    break
+
+        if validation_reason:
+            previous_status = status
+            reasons = tuple(sorted(set(reasons) | {validation_reason}))
+            status = "fallback"
+            state_record["statuses"]["fallback"] += 1
+            state_record["statuses"][previous_status] -= 1
+            resource_status_counts["fallback"] += 1
+            resource_status_counts[previous_status] -= 1
+
+        if status == "fallback":
+            proxy_boxes, geometry_class, proxy_reasons = _resource_proxy_boxes(name, props, pos, reasons)
+            if geometry_class == "air":
+                continue
+            shape_counts[geometry_class] += 1
+            block_names[name] += 1
+            state_record["proxy_blocks"] += 1
+            for reason in proxy_reasons:
+                state_record["reasons"][reason] += 1
+                fallback_reasons[f"resource:{reason}"] += 1
+            block_boxes.extend(proxy_boxes)
+            continue
+
+        resource_faces.extend(prepared_faces)
+        state_record["resolved_faces"] += len(prepared_faces)
+        if not prepared_faces:
+            # A face-less resolved/partial model is intentionally left empty;
+            # any parser approximation reason remains visible in the manifest.
+            empty_resource_model_count += 1
+            continue
         block_names[name] += 1
-        if fallback_reason:
-            fallback_reasons[fallback_reason] += 1
-        color = _stable_color(name)
-        for local in local_boxes:
-            lo = tuple(pos[i] + local[i] for i in range(3))
-            hi = tuple(pos[i] + local[i + 3] for i in range(3))
-            block_boxes.append(_Box(lo, hi, color, "block"))
+        class_name = "resource_model_partial" if status == "partial" else "resource_model_resolved"
+        shape_counts[class_name] += 1
+
+        # Cross-section pictures are 2D occupancy diagrams; the model's local
+        # bounding box is intentionally used as an approximation there.
+        all_points = np.asarray([point for face in prepared_faces for point in face.points], dtype=np.float64)
+        lo = np.min(all_points, axis=0)
+        hi = np.max(all_points, axis=0)
+        for axis in range(3):
+            if hi[axis] - lo[axis] < 1e-6:
+                hi[axis] = lo[axis] + 0.001
+        resource_section_boxes.append(
+            _Box(tuple(lo.tolist()), tuple(hi.tolist()), _stable_color(name), "resource_section_proxy")
+        )
+
+    if resource_stack is not None:
+        # describe() records content hashes for assets actually read during
+        # resolution, so refresh it after the per-block work is complete.
+        resource_sources = resource_stack.describe()
+        resource_stack.close()
 
     marker_boxes = _unknown_marker_boxes(data, bounds_min, bounds_max_exclusive)
-    block_faces = _surface_faces(block_boxes, cull_internal=True)
+    # Once arbitrary resource geometry or transparent shapes may be present,
+    # geometry is kept without hidden-face removal. This avoids suppressing a
+    # neighboring face through a transparent or partial model.
+    block_faces = _surface_faces(block_boxes, cull_internal=resource_stack is None)
     marker_faces = _surface_faces(marker_boxes, cull_internal=False)
-    faces = block_faces + marker_faces
+    faces = block_faces + resource_faces + marker_faces
 
     block_mesh = _mesh_from_faces(block_faces, world_origin)
     marker_mesh = _mesh_from_faces(marker_faces, world_origin)
     gltf_scene = trimesh.Scene()
     if block_mesh is not None:
-        gltf_scene.add_geometry(block_mesh, geom_name="simplified_block_geometry", node_name="minecraft_spatial_blocks")
+        mesh_name = "block_proxy_geometry" if resource_stack is not None else "simplified_block_geometry"
+        gltf_scene.add_geometry(block_mesh, geom_name=mesh_name, node_name="minecraft_spatial_blocks")
+    if resource_faces:
+        from .resource_render import meshes_from_resource_faces
+
+        for mesh_name, resource_mesh in meshes_from_resource_faces(resource_faces, world_origin):
+            gltf_scene.add_geometry(resource_mesh, geom_name=mesh_name, node_name=mesh_name)
     if marker_mesh is not None:
         gltf_scene.add_geometry(marker_mesh, geom_name="unknown_chunk_frames", node_name="unknown_chunk_markers")
     glb_path = output / "model.glb"
     glb_bytes = gltf_scene.export(file_type="glb") if gltf_scene.geometry else _empty_glb()
+    if resource_faces:
+        from .resource_render import glb_nearest_repeat_sampling
+
+        glb_bytes = glb_nearest_repeat_sampling(glb_bytes)
     glb_path.write_bytes(glb_bytes)
 
     views_dir = output / "views"
@@ -703,7 +968,9 @@ def render_scene(
     for view in requested_views:
         path = views_dir / f"{view}.png"
         _render_view(path, view, faces, data.get("unknown_chunks", ()), bounds_min, bounds_max,
-                     no_known_solids=no_known_solids)
+                     no_known_solids=no_known_solids,
+                     no_solids_message=("No visible static geometry resolved in this bounded Scene"
+                                        if resource_stack is not None else None))
         view_paths[view] = str(path.relative_to(output))
 
     section_paths: dict[str, str] = {}
@@ -714,12 +981,65 @@ def render_scene(
         for axis, axis_name in enumerate(("x", "y", "z")):
             plane = bounds_min[axis] + (bounds_max[axis] + 1 - bounds_min[axis]) / 2
             path = section_dir / f"{axis_name}_mid.png"
-            _render_section(path, axis, plane, block_boxes, data.get("unknown_chunks", ()), bounds_min, bounds_max,
-                            no_known_solids=no_known_solids)
+            _render_section(path, axis, plane, block_boxes + resource_section_boxes,
+                            data.get("unknown_chunks", ()), bounds_min, bounds_max,
+                            no_known_solids=no_known_solids,
+                            resource_approximation=resource_stack is not None)
             section_paths[axis_name] = str(path.relative_to(output))
             section_planes[axis_name] = plane
 
-    complexity_fallback_count = sum(fallback_reasons.values())
+    complexity_fallback_count = (
+        sum(int(record["proxy_blocks"]) for record in resource_state_counts.values())
+        if resource_stack is not None else sum(fallback_reasons.values())
+    )
+    resource_states_manifest = {
+        key: {
+            "blocks": int(record["blocks"]),
+            "status_counts": {name: count for name, count in sorted(record["statuses"].items()) if count > 0},
+            "reasons": {name: count for name, count in sorted(record["reasons"].items()) if count > 0},
+            "model_ids": {name: count for name, count in sorted(record["model_ids"].items()) if count > 0},
+            "resolved_faces": int(record["resolved_faces"]),
+            "proxy_blocks": int(record["proxy_blocks"]),
+        }
+        for key, record in sorted(resource_state_counts.items())
+    }
+    if resource_stack is None:
+        fidelity: dict[str, Any] = {
+            "level": "simplified_voxel_geometry",
+            "geometry_is_exact_minecraft_render_model": False,
+            "textures_or_resource_packs_used": False,
+            "lighting": "flat directional face shading; no game lighting or ambient occlusion",
+            "occlusion": "per-pixel CPU depth buffer",
+            "supported_state_geometry": ["slab bottom/top/double", "straight stairs with facing and half"],
+            "limitations": [
+                "Stairs are two-box straight proxies; stair shape is not neighbor-resolved and inner/outer corners fall back to a cube.",
+                "Blocks without a dedicated slab/stair rule are rendered as a full cube, including plants, doors, fences, fluids, and modded states.",
+                "Block textures, UVs, tint, connected textures, block entities, and resource-pack JSON models are not loaded.",
+                "PNG output is an orthographic software preview, not a Minecraft or path-traced render.",
+                "Unknown chunks are orange framed/hatch-marked and must not be interpreted as air.",
+            ],
+        }
+    else:
+        fidelity = {
+            "level": "resource_pack_static_json_geometry",
+            "geometry_is_exact_minecraft_render_model": False,
+            "textures_or_resource_packs_used": True,
+            "resource_model_scope": "supported static blockstate and model JSON faces; resolver statuses describe parser coverage, not game-exact output",
+            "texture_sampling": "nearest texel with repeated authored UVs; PNG views and GLB use alpha cutout at 0.5, and referenced PNGs are embedded in GLB materials",
+            "lighting": "unlit texture colors; no game lighting or ambient occlusion",
+            "occlusion": "per-pixel CPU depth buffer without resource-face hidden-face culling",
+            "sections": "resource model sections use local geometry bounding-box proxies; section PNGs are approximate",
+            "approximations": dict(sorted(resource_approximation_reasons.items())),
+            "limitations": [
+                "Resolved means supported static JSON was read; output does not reproduce Minecraft rendering exactly.",
+                "Java renderers and runtime-loaded models are not executed, and some dynamic behavior may not be detectable from JSON.",
+                "Biome tint, animation timing, connected textures, neighbor-dependent context, block entities, and Java model loaders are not evaluated.",
+                "PNG texture alpha is treated as a cutout mask; blended transparency, game lighting, and ambient occlusion are not simulated.",
+                "Resource model cross-sections use local bounding-box proxies rather than exact texture or face intersections.",
+                "Unsupported, missing, or invalid resource states use a documented per-state proxy fallback.",
+                "Unknown chunks are orange framed/hatch-marked and must not be interpreted as air.",
+            ],
+        }
     manifest = {
         "schema_version": 1,
         "renderer": {"name": "minecraft-spatial-kit software voxel renderer", "version": "0.1"},
@@ -737,6 +1057,11 @@ def render_scene(
             "rendered_non_air_blocks": sum(shape_counts.values()),
             "rendered_solid_boxes": len(block_boxes),
             "block_surface_quads": len(block_faces),
+            "resource_model_faces": len(resource_faces),
+            "resource_texture_images": len({(face.texture_key, id(face.texture)) for face in resource_faces
+                                              if face.texture is not None}),
+            "resource_empty_models": empty_resource_model_count,
+            "resource_section_proxy_blocks": len(resource_section_boxes),
             "unknown_chunks": len(data.get("unknown_chunks", ())),
             "unknown_marker_boxes": len(marker_boxes),
             "unknown_marker_surface_quads": len(marker_faces),
@@ -744,22 +1069,12 @@ def render_scene(
             "fallback_blocks": complexity_fallback_count,
             "fallback_reasons": dict(sorted(fallback_reasons.items())),
             "block_names": dict(sorted(block_names.items())),
+            "resource_statuses": {name: count for name, count in sorted(resource_status_counts.items()) if count > 0},
+            "resource_approximation_reasons": dict(sorted(resource_approximation_reasons.items())),
         },
-        "fidelity": {
-            "level": "simplified_voxel_geometry",
-            "geometry_is_exact_minecraft_render_model": False,
-            "textures_or_resource_packs_used": False,
-            "lighting": "flat directional face shading; no game lighting or ambient occlusion",
-            "occlusion": "per-pixel CPU depth buffer",
-            "supported_state_geometry": ["slab bottom/top/double", "straight stairs with facing and half"],
-            "limitations": [
-                "Stairs are two-box straight proxies; stair shape is not neighbor-resolved and inner/outer corners fall back to a cube.",
-                "Blocks without a dedicated slab/stair rule are rendered as a full cube, including plants, doors, fences, fluids, and modded states.",
-                "Block textures, UVs, tint, connected textures, block entities, and resource-pack JSON models are not loaded.",
-                "PNG output is an orthographic software preview, not a Minecraft or path-traced render.",
-                "Unknown chunks are orange framed/hatch-marked and must not be interpreted as air.",
-            ],
-        },
+        "resource_sources": resource_sources,
+        "resource_states": resource_states_manifest,
+        "fidelity": fidelity,
         "provenance": data.get("provenance", {}),
     }
     manifest_path = output / "render_manifest.json"

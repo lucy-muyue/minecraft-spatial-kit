@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import sys
 from collections import Counter
@@ -68,6 +69,55 @@ def _add_overwrite(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_resource_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--resource-pack",
+        action="append",
+        type=Path,
+        default=[],
+        metavar="PATH",
+        help="resource directory, ZIP, or JAR; repeat in low-to-high priority order",
+    )
+    parser.add_argument(
+        "--resource-config",
+        type=Path,
+        help="JSON file with ordered resource sources (relative paths and globs use its directory)",
+    )
+
+
+def _resource_paths(args: argparse.Namespace) -> tuple[Path, ...]:
+    """Load ordered config sources, followed by explicit CLI overrides."""
+    paths: list[Path] = []
+    config_path = getattr(args, "resource_config", None)
+    if config_path is not None:
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"cannot read resource config {config_path}: {exc}") from exc
+        if not isinstance(config, dict) or not isinstance(config.get("sources"), list):
+            raise ValueError(f"resource config must be a JSON object with a sources array: {config_path}")
+        for index, source in enumerate(config["sources"]):
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError(f"resource config source {index + 1} must be a non-empty path or glob string")
+            candidate = Path(source).expanduser()
+            if not candidate.is_absolute():
+                candidate = config_path.parent / candidate
+            pattern = str(candidate)
+            matches = sorted(Path(match) for match in glob.glob(pattern))
+            if not matches:
+                raise ValueError(f"resource config source {index + 1} matched no files or directories: {source}")
+            for match in matches:
+                if not match.exists() or not (match.is_dir() or match.is_file()):
+                    raise ValueError(f"resource config source is not a file or directory: {match}")
+                paths.append(match)
+    explicit = tuple(getattr(args, "resource_pack", ()) or ())
+    for path in explicit:
+        if not path.exists() or not (path.is_dir() or path.is_file()):
+            raise ValueError(f"resource pack path is not a file or directory: {path}")
+        paths.append(path)
+    return tuple(paths)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mc-spatial",
@@ -102,15 +152,18 @@ def _build_parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--max-blocks", type=int, default=50_000)
     render_parser.add_argument("--views", nargs="+", default=["iso", "top", "north", "east"])
     render_parser.add_argument("--no-sections", action="store_true")
+    _add_resource_options(render_parser)
     _add_overwrite(render_parser)
 
     blueprint_parser = commands.add_parser("blueprint", help="make a Scene, visual preview, and mc-builder plan from a plan JSON")
     blueprint_parser.add_argument("--input", type=Path, required=True, help="mc-builder operations JSON")
     blueprint_parser.add_argument("--out", type=Path, required=True, help="output directory")
+    _add_resource_options(blueprint_parser)
     _add_overwrite(blueprint_parser)
 
     demo_parser = commands.add_parser("demo", help="generate a synthetic pavilion scene and visual review bundle")
     demo_parser.add_argument("--out", type=Path, required=True, help="output directory")
+    _add_resource_options(demo_parser)
     _add_overwrite(demo_parser)
     return parser
 
@@ -163,14 +216,28 @@ def synthetic_pavilion_plan() -> dict[str, Any]:
     return {"dimension": "minecraft:overworld", "operations": operations}
 
 
-def _write_render(scene: dict[str, Any], out: Path, *, overwrite: bool, max_blocks: int = 50_000) -> dict[str, Any]:
+def _write_render(
+    scene: dict[str, Any],
+    out: Path,
+    *,
+    overwrite: bool,
+    max_blocks: int = 50_000,
+    resource_packs: Sequence[Path] = (),
+) -> dict[str, Any]:
     from .render import render_scene
 
     _ensure_output_dir(out, overwrite=overwrite)
-    return render_scene(scene, out, max_blocks=max_blocks)
+    return render_scene(scene, out, max_blocks=max_blocks, resource_packs=resource_packs)
 
 
-def _run_blueprint(plan: dict[str, Any], source_sha256: str | None, out: Path, *, overwrite: bool) -> dict[str, Any]:
+def _run_blueprint(
+    plan: dict[str, Any],
+    source_sha256: str | None,
+    out: Path,
+    *,
+    overwrite: bool,
+    resource_packs: Sequence[Path] = (),
+) -> dict[str, Any]:
     from .scene import save_scene
 
     _ensure_output_dir(out, overwrite=overwrite)
@@ -178,7 +245,7 @@ def _run_blueprint(plan: dict[str, Any], source_sha256: str | None, out: Path, *
     scene_path = save_scene(scene, out / "scene.json")
     builder_plan = scene_to_plan(scene)
     plan_path = dump_plan(builder_plan, out / "mc-builder-blueprint.json")
-    rendered = _write_render(scene, out, overwrite=True)
+    rendered = _write_render(scene, out, overwrite=True, resource_packs=resource_packs)
     return {
         "scene": str(scene_path),
         "blueprint": str(plan_path),
@@ -240,18 +307,27 @@ def _execute(args: argparse.Namespace) -> int:
             max_blocks=args.max_blocks,
             views=tuple(args.views),
             sections=not args.no_sections,
+            resource_packs=_resource_paths(args),
         )
         _print_result(result)
         return 0
 
     if args.command == "blueprint":
         plan, source_sha256 = load_plan(args.input)
-        _print_result(_run_blueprint(plan, source_sha256, args.out, overwrite=args.overwrite))
+        _print_result(_run_blueprint(
+            plan,
+            source_sha256,
+            args.out,
+            overwrite=args.overwrite,
+            resource_packs=_resource_paths(args),
+        ))
         return 0
 
     if args.command == "demo":
         plan = synthetic_pavilion_plan()
-        _print_result(_run_blueprint(plan, None, args.out, overwrite=args.overwrite))
+        _print_result(_run_blueprint(
+            plan, None, args.out, overwrite=args.overwrite, resource_packs=_resource_paths(args)
+        ))
         return 0
 
     raise ValueError(f"unsupported command: {args.command}")

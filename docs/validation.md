@@ -10,7 +10,13 @@ The probes covered vanilla and modded block IDs, known air, a top slab, stair fa
 
 ## Synthetic automated checks
 
-Unit tests build small synthetic Anvil region files in temporary directories. They cover negative coordinates, negative and high section Y values, block-state palette reads, known air versus missing chunks, dimension separation, custom height bounds, source-change detection, Scene export, and rendering. Blueprint checks cover inclusive cuboid and shell semantics, last-operation-wins behavior, state-preserving export, unknown-data rejection, and CLI export argument dispatch. The current suite has 25 passing tests; CI runs these fixtures without a real save.
+Unit tests build small synthetic Anvil region files in temporary directories. They cover negative coordinates, negative and high section Y values, block-state palette reads, known air versus missing chunks, dimension separation, custom height bounds, source-change detection, Scene export, and rendering. Resource tests use only authored fixtures to cover variants, multipart conditions, model and texture inheritance, orientation, flat cross planes, archive overrides, rendered textures, fallback reporting, and CLI resource-option dispatch. Blueprint checks cover inclusive cuboid and shell semantics, last-operation-wins behavior, state-preserving export, unknown-data rejection, and CLI argument dispatch. The current suite has 41 passing tests; CI uses synthetic inputs without a real save or Minecraft assets.
+
+## Static resource-pack smoke checks
+
+A separate read-only CLI smoke used a matching Minecraft Java 1.20.1 client JAR, the local mod JARs, and local override asset directories. The bounded synthetic Scene probed one unlit east-facing furnace, a poppy cross model, an unconnected oak fence multipart, bottom/east and top/north straight oak stairs, one BetterEnd lantern, and one Rocks variant. The furnace's front quad resolved to the east face. Six states reported `resolved`; the rotated top/north stairs reported `partial` with `uvlock_not_applied`. None of these selected probes used proxy geometry after the flat-plane fix.
+
+This is evidence for those specific states and the supplied local source stack only. It does not indicate all resources from either mod or all block states are supported. The resolver reads assets on demand; manifest source fingerprints cover assets actually read rather than scanning or certifying whole packs. No world data or real mod textures are included in this repository, and the smoke output remains local.
 
 The `mc-spatial` CLI was also run end to end against a generated one-chunk Anvil fixture: index, Scene export, known stone query, known-air query, unknown outside-coverage query, then GLB/view/section/manifest rendering all completed successfully. The fixture and its outputs were temporary and synthetic.
 

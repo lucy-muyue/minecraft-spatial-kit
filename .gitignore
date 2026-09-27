@@ -29,3 +29,5 @@ reports/
 *.usdz
 *.png
 !docs/assets/demo.png
+!docs/assets/resource-demo.png
+!examples/synthetic_mod_resource_pack/assets/spatial_demo/textures/block/*.png

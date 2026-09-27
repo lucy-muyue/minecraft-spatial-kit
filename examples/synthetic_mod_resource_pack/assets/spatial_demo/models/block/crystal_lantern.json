@@ -1,0 +1,6 @@
+{
+  "parent": "spatial_demo:block/lantern_frame",
+  "textures": {
+    "metal": "spatial_demo:block/lilac_metal"
+  }
+}
