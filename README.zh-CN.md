@@ -2,7 +2,7 @@
 
 **Minecraft Spatial Kit** 从本地 Minecraft Java 世界文件中索引有限区域、查询精确方块、渲染空间预览，并导出供 [mc-builder](https://github.com/lucy-muyue/mc-builder) 使用的蓝图 JSON。它是离线文件工具，不连接游戏服务器，也不放置方块。
 
-[English README](README.md) · [Agent skill](skills/minecraft-spatial/SKILL.md) · [索引指南](docs/index.md) · [渲染指南](docs/rendering.md) · [渲染取舍](docs/rendering-decisions.md) · [验证记录](docs/validation.md) · [Agent 设计与施工交接](docs/workflow.md)
+[English README](README.md) · [Agent skill](skills/minecraft-spatial/SKILL.md) · [索引指南](docs/index.md) · [渲染指南](docs/rendering.md) · [渲染取舍](docs/rendering-decisions.md) · [方案调研](docs/research.md) · [验证记录](docs/validation.md) · [Agent 设计与施工交接](docs/workflow.md)
 
 Agent 可直接阅读 [`skills/minecraft-spatial/`](skills/minecraft-spatial/)，或将整个目录复制到自己的 skill 目录。服务端安装和配置属于 [mc-builder](https://github.com/lucy-muyue/mc-builder)，见其 [README](https://github.com/lucy-muyue/mc-builder/blob/main/README.md) 与 [AGENT_BUILDING_GUIDE](https://github.com/lucy-muyue/mc-builder/blob/main/AGENT_BUILDING_GUIDE.md)。Minecraft Spatial Kit 只导出本地文件，不安装服务端工作者或修改服务端配置。
 
