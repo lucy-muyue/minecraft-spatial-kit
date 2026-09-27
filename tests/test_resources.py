@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from minecraft_spatial.resources import ResourcePackStack
+from minecraft_spatial.resources import ResourceError, ResourcePackStack, _MAX_JSON_NESTING
 
 
 def write_json(root: Path, relative: str, value: dict) -> None:
@@ -199,6 +199,20 @@ class ResourceResolverTests(unittest.TestCase):
             blockstates.mkdir(parents=True)
             deep_json = '{"variants":{"":{"model":"test:block/empty"}},"ignored":' + "[" * 1800 + "0" + "]" * 1800 + "}"
             (blockstates / "deep_json.json").write_text(deep_json, encoding="utf-8")
+            max_depth = _MAX_JSON_NESTING - 1  # root object accounts for one level
+            accepted_json = (
+                '{"variants":{"":{"model":"test:block/empty"}},"ignored":'
+                + "[" * max_depth + "0" + "]" * max_depth
+                + ',"symbols":"' + "[]{}" * 100 + '"}'
+            )
+            (blockstates / "at_limit.json").write_text(accepted_json, encoding="utf-8")
+            beyond_limit = max_depth + 1
+            rejected_json = (
+                '{"variants":{"":{"model":"test:block/empty"}},"ignored":'
+                + "[" * beyond_limit + "0" + "]" * beyond_limit + "}"
+            )
+            (blockstates / "over_limit.json").write_text(rejected_json, encoding="utf-8")
+            write_json(root, "assets/test/models/block/empty.json", {"elements": []})
             nested_condition: dict = {"powered": "true"}
             for _ in range(70):
                 nested_condition = {"AND": [nested_condition]}
@@ -209,10 +223,17 @@ class ResourceResolverTests(unittest.TestCase):
             with ResourcePackStack([root]) as stack:
                 deep_json_result = stack.resolve_block("test:deep_json")
                 self.assertEqual(deep_json_result.status, "fallback")
-                self.assertTrue(any(reason.startswith("invalid_json:") for reason in deep_json_result.reasons))
+                self.assertTrue(any(reason.startswith("invalid_json_depth_limit:") for reason in deep_json_result.reasons))
+                at_limit_result = stack.resolve_block("test:at_limit")
+                self.assertEqual(at_limit_result.status, "resolved")
+                over_limit_result = stack.resolve_block("test:over_limit")
+                self.assertEqual(over_limit_result.status, "fallback")
+                self.assertTrue(any(reason.startswith("invalid_json_depth_limit:") for reason in over_limit_result.reasons))
                 deep_condition_result = stack.resolve_block("test:deep_condition", {"powered": "true"})
                 self.assertEqual(deep_condition_result.status, "fallback")
-                self.assertTrue(any("multipart_condition_depth_limit" in reason for reason in deep_condition_result.reasons))
+                self.assertTrue(any(reason.startswith("invalid_json_depth_limit:") for reason in deep_condition_result.reasons))
+                with self.assertRaisesRegex(ResourceError, "multipart_condition_depth_limit"):
+                    ResourcePackStack._condition_matches(nested_condition, {"powered": "true"})
 
     def test_empty_model_is_resolved_empty_geometry_while_missing_assets_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

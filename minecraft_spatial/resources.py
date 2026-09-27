@@ -29,6 +29,7 @@ _RESOURCE_ID = re.compile(r"^[a-z0-9_.-]+:[a-z0-9_./-]+$")
 _MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 _MAX_ARCHIVE_ENTRIES = 100_000
 _MAX_JSON_BYTES = 4 * 1024 * 1024
+_MAX_JSON_NESTING = 64
 _MAX_TEXTURE_BYTES = 32 * 1024 * 1024
 _MAX_TEXTURE_PIXELS = 16_000_000
 _MAX_TEXTURE_SIDE = 8192
@@ -43,6 +44,35 @@ _MAX_CACHED_TEXTURE_BYTES = 128 * 1024 * 1024
 
 class ResourceError(ValueError):
     """An asset is missing, malformed, unsupported, or exceeds a safety cap."""
+
+
+def _check_json_nesting(raw: bytes, resource_path: str) -> None:
+    """Apply a Python-version-independent structural nesting limit.
+
+    Count JSON arrays and objects while ignoring delimiters inside quoted
+    strings. The JSON decoder remains responsible for reporting malformed
+    syntax and mismatched brackets.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:  # backslash
+                escaped = True
+            elif byte == 0x22:  # quote
+                in_string = False
+            continue
+        if byte == 0x22:
+            in_string = True
+        elif byte in (0x7B, 0x5B):  # { or [
+            depth += 1
+            if depth > _MAX_JSON_NESTING:
+                raise ResourceError(f"invalid_json_depth_limit:{resource_path}")
+        elif byte in (0x7D, 0x5D) and depth:  # } or ]
+            depth -= 1
 
 
 @dataclass(frozen=True)
@@ -259,6 +289,7 @@ class ResourcePackStack:
         raw = self._read_asset(resource_path, _MAX_JSON_BYTES)
         if raw is None:
             raise ResourceError(f"asset_missing:{resource_path}")
+        _check_json_nesting(raw, resource_path)
         try:
             value = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
@@ -677,6 +708,7 @@ class ResourcePackStack:
         metadata_path = f"assets/{namespace}/textures/{path}.png.mcmeta"
         metadata_raw = self._read_asset(metadata_path, _MAX_JSON_BYTES)
         if metadata_raw is not None:
+            _check_json_nesting(metadata_raw, metadata_path)
             try:
                 metadata = json.loads(metadata_raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
