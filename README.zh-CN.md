@@ -19,6 +19,18 @@ mc-spatial demo --out ./pavilion-preview
 
 示例会生成 `scene.json`、`mc-builder-blueprint.json`、`model.glb`、四张 PNG 视图、三张剖面图和 `render_manifest.json`。亭子是虚构设计，包含入口、底 slab 屋顶与直线楼梯；示例坐标均为编造值。
 
+仓库还提供一个完全合成的类 mod 方块示例，包含非立方体 JSON 模型、朝向变体、继承纹理和自行绘制的小型 PNG。使用下面的命令渲染其中的单方块 Scene：
+
+![合成资源包模型预览](docs/assets/resource-demo.png)
+
+```bash
+mc-spatial render --scene ./examples/synthetic_mod_scene.json \
+  --resource-pack ./examples/synthetic_mod_resource_pack \
+  --out ./synthetic-mod-preview
+```
+
+manifest 会报告静态资源是否解析，以及部分解析或回退几何的原因。资源文件存在不代表预览能还原游戏内的全部特性。
+
 ## 勘察世界区域
 
 Minecraft 方块坐标约定为 **X 向东、Y 向上、Z 向南**。每个坐标还属于明确的维度。范围端点均包含在导出区域中。
@@ -40,7 +52,22 @@ Minecraft 方块坐标约定为 **X 向东、Y 向上、Z 向南**。每个坐�
    mc-spatial render --scene ./scene.json --out ./scene-preview
    ```
 
-   打开 `views/iso.png` 理解高度和形状，打开 `views/top.png` 看平面占地；再查看 `sections/x_mid.png`、`sections/y_mid.png`、`sections/z_mid.png` 的中心剖面。`render_manifest.json` 会列出覆盖情况和几何简化项。
+   若要读取静态 mod 模型，按低到高优先级传入资源：与世界对应的 Minecraft 客户端 JAR、已启用的 mod JAR，最后是覆盖包。可重复传入 `--resource-pack`；支持包含 `assets/` 的目录、ZIP 或 JAR：
+
+   ```bash
+   mc-spatial render --scene ./scene.json --out ./scene-preview \
+     --resource-pack /path/to/1.20.1/client.jar \
+     --resource-pack /path/to/mods/mod-a.jar \
+     --resource-pack /path/to/resourcepacks/local-overrides.zip
+   ```
+
+   mod 很多时，用 `--resource-config ./resource-sources.json` 指向 JSON 配置，按同样的低到高顺序列出 `sources`。相对路径以配置文件所在目录为基准；例如 `mods/*.jar` 会按路径排序展开。命令行额外传入的 `--resource-pack` 会追加在配置来源之后，因此优先级更高。CLI 按用户列出的顺序处理资源，不会推断 mod 加载器对同名资源采用的实际优先级。请勿提交包含私有目录路径的本地配置。资源在每次渲染时读取，不会触发世界重新索引。
+
+   ```json
+   {"sources": ["client.jar", "mods/*.jar", "resourcepacks/local-overrides.zip"]}
+   ```
+
+   打开 `views/iso.png` 理解高度和形状，打开 `views/top.png` 看平面占地；再查看 `sections/x_mid.png`、`sections/y_mid.png`、`sections/z_mid.png` 的中心剖面。`render_manifest.json` 会列出覆盖情况、资源状态和原因（若使用资源包），以及几何简化项。
 
 3. **根据疑问缩小范围。** 对入口、支撑或路线导出更小的范围，或者调整 Y 范围查看另一层，再重新渲染。对关键点执行 query，检查精确方块和状态：
 

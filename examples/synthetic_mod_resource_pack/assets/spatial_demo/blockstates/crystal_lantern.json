@@ -1,0 +1,8 @@
+{
+  "variants": {
+    "facing=north": {"model": "spatial_demo:block/crystal_lantern", "y": 0},
+    "facing=east": {"model": "spatial_demo:block/crystal_lantern", "y": 90},
+    "facing=south": {"model": "spatial_demo:block/crystal_lantern", "y": 180},
+    "facing=west": {"model": "spatial_demo:block/crystal_lantern", "y": 270}
+  }
+}

@@ -21,6 +21,8 @@ mc-spatial render --scene ./scene.json --out ./scene-preview
 mc-spatial blueprint --input ./plan.json --out ./plan-review
 ```
 
-After rendering, inspect the PNG views and `render_manifest.json`; check source coverage, unknown chunks, and any simplified or missing features. A missing or unindexed position is unknown, never air. Keep world databases, coordinates, screenshots, and generated assets local unless a sanitized synthetic fixture is intentionally prepared.
+For modded static models, pass `--resource-pack PATH` in low-to-high priority order (matching client JAR, enabled mod JARs, then overrides); the path may be an `assets/` directory, ZIP, or JAR. For a large mod set, use `--resource-config ./resource-sources.json` with an ordered `sources` array. These options also apply to `blueprint` and `demo`. See the [rendering guide](../../docs/rendering.md) for relative paths, globs, precedence, and limitations.
+
+After rendering, inspect the PNG views and `render_manifest.json`; check source coverage, unknown chunks, resource status/reasons, missing assets, and any simplified features. A resource file being present does not prove that it was selected or faithfully rendered. Resource packs are read at render time and do not require reindexing the world. A missing or unindexed position is unknown, never air. Keep world databases, coordinates, screenshots, and generated assets local unless a sanitized synthetic fixture is intentionally prepared.
 
 Blueprint export is a design artifact. Review its JSON and images, then use the user's existing mc-builder workflow for its separate local `preview_build` validation. Offline export does not approve a construction site or authorize writing. Do not trigger `prepare_build`, `start_build`, or rollback unless the active user request already authorizes those live-world actions; do not add a new approval step when that authorization is already explicit.

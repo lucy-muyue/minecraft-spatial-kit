@@ -8,7 +8,7 @@ Keep the current Python path small and explicit:
 
 1. Use `nbtlib==2.0.4` to decode chunk NBT, a narrow read-only Anvil reader for region records and block-state palettes, and SQLite for the refreshable local index.
 2. Export bounded, dimension-aware Scene v1 JSON. Keep absent, corrupt, unsupported, or stale-after-refresh coverage unknown; never infer air from missing data.
-3. Render that Scene with the project's `trimesh` geometry export and NumPy/Pillow CPU images. The mesh and images are inspectable, while the manifest names simplified geometry and fallback blocks.
+3. Render that Scene with the project's offline `trimesh`/NumPy/Pillow path. Without resources, it uses small built-in shape rules and cube proxies. With explicitly supplied client/mod/override resources, it can resolve a supported subset of static JSON blockstates, models, and textures; the manifest names status, reasons, approximations, and fallbacks.
 
 This route keeps the data path local and read-only, avoids requiring Java, Node, Blender, or a GPU, and reuses one Scene contract for indexing, query, preview, and blueprint design. It is the minimum route for the current bounded-inspection use case, not a claim that it renders every Minecraft model exactly.
 
@@ -28,13 +28,13 @@ The `nbtlib` choice has a deliberate trade-off: its upstream warning remains rel
 
 | Route | Strength | Limit for the current workflow |
 |---|---|---|
-| Project renderer (`trimesh`, NumPy, Pillow) | Local CPU generation of a mesh GLB, four directional/overview PNGs, and center sections from Scene JSON. | State geometry is intentionally partial; textures, UVs, biome tints, connected models, entities, and mod resource-pack models are not reproduced. The manifest records simplifications and fallbacks. |
+| Project renderer (`trimesh`, NumPy, Pillow) | Local CPU generation of a mesh GLB, PNG views, and center sections from Scene JSON; optionally reads ordered client/mod/override resource roots for supported static blockstate/model JSON and textures. | JSON support is a documented subset, not a Minecraft runtime renderer. Java custom renderers, tinting, animation timing, neighbor context, fluids, and block entities remain outside its scope; unresolved states use proxies. See [the rendering guide](rendering.md) for the current interface and limits. |
 | MiEx | Its repository state checked on this date documents Minecraft resource/model-aware world export to USD, including mod and resource-pack content, and labels its licence BSD-3-Clause. | No official GLB/OBJ output was found. The checked headless CLI is experimental, and the full USD conversion route below has not been tested in this project. |
 | Mineways | Its checked v13.01 release documents current block updates through 26.2 and supports scripted/headless OBJ/MTL export. | The release does not establish 26.3 support; the project documents no Linux build (Wine is an option), and mod support is limited. It does not directly produce the required GLB and annotated sections. |
 | Chunky | Java path tracing can produce high-quality PNGs from a saved scene and has a documented headless launcher. | It is an image renderer rather than a mesh exporter; the checked project documentation says Java 17 and notes mod-block limits. It does not replace Scene-based GLB or section views. |
 | BlueMap | The checked v5.24 release targets Minecraft 1.13.2–26.3 and Java 25; its standalone mode produces browsable 3D map data. | It is suited to a browser map, not a generic local GLB export. Initial resource preparation and its runtime make it a separate optional tool. |
 
-For an inspectable local artifact, the project's current renderer is the simplest route. Chunky is a possible optional source of more polished PNGs; BlueMap is a distinct browser-map product. Neither should be a core dependency for bounded Scene previews.
+The renderer's original v0.1 baseline used simplified slabs/stairs and cube proxies without loading textures or resource-pack models. The current optional resource path adds a supported static JSON subset while retaining the same explicit fidelity limits and fallback reporting; this is a bounded feature addition, not full mod compatibility. Chunky is a possible optional source of more polished PNGs; BlueMap is a distinct browser-map product. Neither should be a core dependency for bounded Scene previews.
 
 ## Possible higher-fidelity adapter: MiEx → USD → Blender
 
@@ -53,7 +53,7 @@ The public project should continue to use synthetic examples and should not bund
 
 ## Compatibility boundary
 
-The reader currently targets modern root/section block-state data and requires full chunks. Compatibility validation includes Java 1.20.1; that does not certify every later release or modded storage extension. Unsupported compression, external chunk records, malformed palettes, and incomplete chunks remain unknown. The index checks source hashes on explicit refresh and provides per-region consistency, not an atomic snapshot across a changing world. Scene v1 carries block states, not entities, block entities, biomes, lighting, or game resource-pack models. These limits are part of the evidence behind the minimal route and should be revisited when a new supported version or adapter is added.
+The reader currently targets modern root/section block-state data and requires full chunks. Compatibility validation includes Java 1.20.1; that does not certify every later release or modded storage extension. Unsupported compression, external chunk records, malformed palettes, and incomplete chunks remain unknown. The index checks source hashes on explicit refresh and provides per-region consistency, not an atomic snapshot across a changing world. Scene v1 carries block states, not entities, block entities, biomes, lighting, or a guarantee that supported static resource models reproduce the game. The renderer resolves only resources explicitly supplied at render time; it does not scan an installation, execute mod code, or infer loader precedence. These limits are part of the evidence behind the minimal route and should be revisited when a new supported version or adapter is added.
 
 ## Primary sources
 

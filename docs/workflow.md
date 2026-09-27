@@ -18,7 +18,9 @@ Use `export` to create a portable Scene JSON for a bounded region. A block query
 
 ## Inspect a scene
 
-Run `mc-spatial render --scene ... --out ...`. Inspect the PNG views and section images, then read `render_manifest.json` for source, coverage, rendering method, and features that were simplified or omitted. A static mesh and its images do not include every block entity, entity, modded machine, texture, or gameplay behavior. Treat the manifest as part of the deliverable.
+Run `mc-spatial render --scene ... --out ...`. For modded static models, add `--resource-pack` paths in low-to-high priority order: matching client JAR, enabled mod JARs, then user overrides. A `--resource-config` JSON file with ordered `sources` and relative paths/globs is useful for larger installations; command-line packs are appended as higher-priority overrides. Resource inputs are read during rendering and do not refresh the world index.
+
+Inspect the PNG views and section images, then read `render_manifest.json` for source, coverage, per-state resource status/reasons, rendering method, and features that were approximated or omitted. Check the asset paths actually used and any missing/unsupported model reasons. Files being present is not proof the correct asset won resolution or that the game appearance was fully reproduced. The renderer does not run Java custom renderers or mod code, and a static mesh does not include every block entity, entity, modded machine behavior, tint, animation, or fluid effect. Treat the manifest as part of the deliverable.
 
 ## Create a blueprint file
 

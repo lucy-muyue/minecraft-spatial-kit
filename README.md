@@ -19,6 +19,18 @@ mc-spatial demo --out ./pavilion-preview
 
 The demo creates `scene.json`, `mc-builder-blueprint.json`, `model.glb`, four PNG views, three section images, and `render_manifest.json`. The example is a fictional open pavilion with an entrance, a bottom slab roof, and straight stairs. Its coordinates are invented.
 
+The repository also includes a fully synthetic mod-style block with a non-cube JSON model, facing variants, inherited textures, and tiny self-authored PNGs. Render its one-block Scene with:
+
+![Synthetic resource-pack model preview](docs/assets/resource-demo.png)
+
+```bash
+mc-spatial render --scene ./examples/synthetic_mod_scene.json \
+  --resource-pack ./examples/synthetic_mod_resource_pack \
+  --out ./synthetic-mod-preview
+```
+
+The manifest reports whether the static resource data was resolved and any reasons for partial or fallback geometry. Resource files being present does not mean the preview matches every in-game feature.
+
 ## Inspect a world area
 
 Minecraft block coordinates use **X east, Y up, Z south**. Every position also belongs to a named dimension. Bounds are inclusive: the `--min` and `--max` positions are both part of the region.
@@ -40,7 +52,22 @@ Minecraft block coordinates use **X east, Y up, Z south**. Every position also b
    mc-spatial render --scene ./scene.json --out ./scene-preview
    ```
 
-   Open `views/iso.png` to understand height and shape, and `views/top.png` to inspect the footprint. Read `sections/x_mid.png`, `sections/y_mid.png`, and `sections/z_mid.png` to see the center cuts. Check `render_manifest.json` for coverage and geometry simplifications.
+   For static mod models, pass resource sources from lower to higher priority. Start with the matching Minecraft client JAR, then enabled mod JARs, then any override pack. The repeatable `--resource-pack` flag accepts a directory containing `assets/`, ZIP, or JAR:
+
+   ```bash
+   mc-spatial render --scene ./scene.json --out ./scene-preview \
+     --resource-pack /path/to/1.20.1/client.jar \
+     --resource-pack /path/to/mods/mod-a.jar \
+     --resource-pack /path/to/resourcepacks/local-overrides.zip
+   ```
+
+   For large mod folders, `--resource-config ./resource-sources.json` accepts a JSON `sources` array in the same low-to-high order. Paths are relative to the config file, and glob matches such as `mods/*.jar` are sorted by path. Any command-line `--resource-pack` entries are appended after configured sources and therefore have higher priority. The CLI follows the listed order; it does not infer a mod loader's effective priority when sources contain the same resource. The config keeps local paths out of command history; do not commit it if it reveals private folders. Resource sources are read during each render and do not trigger a world reindex.
+
+   ```json
+   {"sources": ["client.jar", "mods/*.jar", "resourcepacks/local-overrides.zip"]}
+   ```
+
+   Open `views/iso.png` to understand height and shape, and `views/top.png` to inspect the footprint. Read `sections/x_mid.png`, `sections/y_mid.png`, and `sections/z_mid.png` to see the center cuts. Check `render_manifest.json` for coverage, per-state resource status/reasons when applicable, and geometry simplifications.
 
 3. **Narrow the question.** Export a smaller box around an entrance, support, or route, or change the Y bounds to inspect another height layer. Render that focused Scene again, then query any point whose exact block or state matters:
 
